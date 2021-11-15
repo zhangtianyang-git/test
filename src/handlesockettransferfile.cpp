@@ -80,11 +80,12 @@ int HandleSocketTransferFile::TcpwriteTransferFile()
     //发送ack，包括[文件大小size##版本VER##ip地址],标识路径
     char sendInfobuf[FILE_HAND_INFO_SIZE];
     memset(sendInfobuf,0,FILE_HAND_INFO_SIZE);
-    sprintf(sendInfobuf,"%d##%s##%s",mfileSize,mSqlver.c_str(),mLocalip.c_str());
+    sprintf(sendInfobuf,"%d##%s##%s||",mfileSize,mSqlver.c_str(),mLocalip.c_str());
     if(send(socketid,sendInfobuf,FILE_HAND_INFO_SIZE,0)<0){
         perror("send erro:");
         return  -1;
     }
+#if 0
     //等待已准备完成信号，接收recv
     char recvInfobuf[FILE_HAND_INFO_SIZE];
     memset(recvInfobuf,0,FILE_HAND_INFO_SIZE);
@@ -99,6 +100,7 @@ int HandleSocketTransferFile::TcpwriteTransferFile()
         cout<<"\e[1,31m"<<__LINE__<<" recv hand info erro..."<<"\e[0m"<<endl;
         return -1;
     }
+#endif
     //打开文件fopen ，准备读取read,并tcp发送
     FILE *fp = fopen(DEFAULT_PATH,"r");
     if(NULL == fp){
@@ -120,7 +122,26 @@ int HandleSocketTransferFile::TcpwriteTransferFile()
     close(socketid);
     return 0;
 }
-
+static int handStrtoken(char *recvInfobuf,list<string>& str_lst){
+    //拆解信息头
+    str_lst.clear();
+    const char str[3] = "##";
+    char *token;
+    /* 获取第一个子字符串 */
+    token = strtok(recvInfobuf, str);
+    /* 继续获取其他的子字符串 */
+    while(token != NULL) {
+        printf( "%s\n", token );
+        string str1(token);
+        str_lst.push_back(str1);
+        token = strtok(NULL, str);
+    }
+    if(str_lst.size()<3) {
+        cout<<"[====="<<"\033[31;1m"<<__FUNCTION__<<" "<<__LINE__<<"\033[0m"<<"]"<<" <3"<<endl;
+        return -1;
+    }
+    return 0;
+}
 int HandleSocketTransferFile::TcpreadTransferFile()
 {
     //初始化socket tcp
@@ -129,6 +150,7 @@ int HandleSocketTransferFile::TcpreadTransferFile()
     char sendInfobuf[FILE_HAND_INFO_SIZE];
     memset(sendInfobuf,0,FILE_HAND_INFO_SIZE);
     mfileSize=0;
+#if 0
     sprintf(sendInfobuf,"%d##%s##%s",mfileSize,mSqlver.c_str(),mLocalip.c_str());
     if(send(socketid,sendInfobuf,FILE_HAND_INFO_SIZE,0)<0){
         perror("send erro:");
@@ -164,7 +186,7 @@ int HandleSocketTransferFile::TcpreadTransferFile()
     mfileSize = atoi((*iter).c_str());
     mSqlver = *(++iter);
     mServerip = *(++iter);
-
+#endif
     //打开文件fopen ，准备读取写,并tcp发送
     FILE *fp = fopen(DEFAULT_PATH,"w");
     if(NULL == fp){
@@ -173,29 +195,73 @@ int HandleSocketTransferFile::TcpreadTransferFile()
     }
     char fileBuffer[FILE_BUFFER_SIZE];
     memset(fileBuffer,0,FILE_BUFFER_SIZE);
-    int readLen=0;
-    while ((readLen = fread(fp,sizeof (char),FILE_BUFFER_SIZE,fp))>0) {
-        if(send(socketid,fileBuffer,readLen,0)<0){
-            cout<<"\e[1,31m"<<__LINE__<<" send file failed..."<<DEFAULT_PATH<<"\e[0m"<<endl;
-            break;
-        }
-    }
-
     int recvlen =0,nodeSize=0,fileSize2=0;
+    bool isStart = true;
     while((recvlen = recv(socketid,fileBuffer,FILE_BUFFER_SIZE,0)) > 0) {
         unsigned int size2 = 0;
-        while( size2 < recvlen ) {
-            if( (nodeSize = fwrite(fileBuffer + size2, 1, recvlen - size2, fp) ) < 0 ) {
-                cout<<"\e[1,31m"<<__LINE__<<" write file failed..."<<DEFAULT_PATH<<"\e[0m"<<endl;
+        if(isStart){
+            isStart = false;
+            //先分解头文件
+            //拆解信息头
+            const char str[3] = "||";
+            char *token;
+            /* 获取第一个子字符串 */
+            token = strtok(fileBuffer, str);
+            /* 继续获取其他的子字符串 */
+            char *tokenTwo = strtok(NULL,str);
+            list<string> str_lst;
+            str_lst.push_back(" ");
+            if(handStrtoken(token,str_lst)<0){
+                cout<<"[====="<<"\033[31;1m"<<__FUNCTION__<<" "<<__LINE__<<"\033[0m"<<"]"<<" hand<3"<<endl;
+                //关闭文件
+                fclose(fp);
                 close(socketid);
-                exit(1);
+                return -1;
             }
-            size2 += nodeSize;
+            list<string>::iterator iter=str_lst.begin();
+            mfileSize = atoi((*iter).c_str());
+            mSqlver = *(++iter);
+            mServerip = *(++iter);
+
+            if(tokenTwo){
+                while( size2 < recvlen ) {
+                    if( (nodeSize = fwrite(tokenTwo + size2, 1, recvlen - size2, fp) ) < 0 ) {
+                        cout<<"\e[1,31m"<<__LINE__<<" write file failed..."<<DEFAULT_PATH<<"\e[0m"<<endl;
+                        close(socketid);
+                        fclose(fp);
+                        exit(1);
+                    }
+                    size2 += nodeSize;
+                }
+                fileSize2 += recvlen;
+                if(fileSize2 >= mfileSize) {
+                    break;
+                }
+            }
+            if(token){
+                free(token);
+                token = NULL;
+            }
+            if(tokenTwo){
+                free(tokenTwo);
+                tokenTwo = NULL;
+            }
+        }else {
+            while( size2 < recvlen ) {
+                if( (nodeSize = fwrite(fileBuffer + size2, 1, recvlen - size2, fp) ) < 0 ) {
+                    cout<<"\e[1,31m"<<__LINE__<<" write file failed..."<<DEFAULT_PATH<<"\e[0m"<<endl;
+                    close(socketid);
+                    fclose(fp);
+                    exit(1);
+                }
+                size2 += nodeSize;
+            }
+            fileSize2 += recvlen;
+            if(fileSize2 >= mfileSize) {
+                break;
+            }
         }
-        fileSize2 += recvlen;
-        if(fileSize2 >= mfileSize) {
-            break;
-        }
+
     }
     //关闭文件
     fclose(fp);
